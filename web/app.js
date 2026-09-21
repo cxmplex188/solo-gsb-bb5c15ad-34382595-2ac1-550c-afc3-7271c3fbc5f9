@@ -4,6 +4,19 @@
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
+const SAFETY_FALLBACK_MEASURES = [
+  { key: "goggles", label: "护目镜", description: "佩戴防溅护目镜/面屏" },
+  { key: "fume_hood", label: "通风", description: "在通风橱/通风良好处操作" },
+  { key: "gloves", label: "手套", description: "佩戴合适材质的防护手套" },
+  { key: "lab_coat", label: "实验服", description: "穿实验服，束扎长发" },
+];
+
+const safetyStatusMeta = {
+  confirmed: ["已确认", "ok"],
+  stale: ["待复核", "medium"],
+  unconfirmed: ["未确认", "blocked"],
+};
+
 const state = {
   reagents: [],
   plans: [],
@@ -11,6 +24,7 @@ const state = {
   categories: {},
   revision: "",
   stepRows: [],          // 方案编辑器中的步骤行
+  safetyMeasures: [],    // 防护措施目录（后端下发）
   editingStepReagents: [],
   customCats: new Set(),
   report: null,
@@ -97,6 +111,17 @@ const catLabel = (key) => state.categories[key]?.label || key;
 const sevRank = { low: 1, medium: 2, high: 3 };
 const sevLabel = { low: "提示", medium: "警示", high: "严重" };
 
+const safetyMeasures = () => (state.safetyMeasures.length ? state.safetyMeasures : SAFETY_FALLBACK_MEASURES);
+const safetyMeasureLabel = (key) => safetyMeasures().find((m) => m.key === key)?.label || key;
+const currentPlanId = () => $("#planId").value ? Number($("#planId").value) : null;
+
+/* 步骤行当前生效的安全状态：已保存方案以服务端状态为准，本地编辑后按 stale 处理 */
+function rowSafetyStatus(row) {
+  if (!currentPlanId() || !row.safety) return "unconfirmed";
+  if (row.safetyDirty) return "stale";
+  return row.safety.status || "unconfirmed";
+}
+
 /* ---------------- 方案编辑 ---------------- */
 
 function makeStepRow(partial = {}) {
@@ -108,7 +133,15 @@ function makeStepRow(partial = {}) {
     reagent_name: partial.reagent_name ?? "",
     categories: partial.categories ?? [],
     note: partial.note ?? "",
+    safety: partial.safety ?? null, // 服务端确认状态（仅已保存方案）
+    safetyDirty: partial.safetyDirty ?? false, // 载入后本地是否改动过（需重新复核）
   };
+}
+
+function markRowDirty(row) {
+  if (row.safety && row.safety.status === "confirmed") row.safetyDirty = true;
+  renderSafetyBar();
+  updateSimulateGate();
 }
 
 function renderStepRows() {
@@ -138,6 +171,7 @@ function renderStepRows() {
       } else {
         row.reagent_id = null;
       }
+      markRowDirty(row);
       renderStepRows();
     });
     tdReg.appendChild(select);
@@ -148,7 +182,7 @@ function renderStepRows() {
       tmp.placeholder = "临时试剂名（如：新配制的王水）";
       tmp.value = row.reagent_name;
       tmp.style.marginTop = "5px";
-      tmp.addEventListener("input", () => (row.reagent_name = tmp.value));
+      tmp.addEventListener("input", () => { row.reagent_name = tmp.value; markRowDirty(row); });
       tdReg.appendChild(tmp);
 
       const catInput = document.createElement("input");
@@ -158,6 +192,7 @@ function renderStepRows() {
       catInput.style.marginTop = "5px";
       catInput.addEventListener("input", () => {
         row.categories = catInput.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+        markRowDirty(row);
       });
       tdReg.appendChild(catInput);
     } else {
@@ -178,7 +213,10 @@ function renderStepRows() {
     const inTime = document.createElement("input");
     inTime.type = "number"; inTime.min = "0"; inTime.step = "1";
     inTime.value = row.time_offset_min ?? "";
-    inTime.addEventListener("input", () => (row.time_offset_min = inTime.value === "" ? null : Number(inTime.value)));
+    inTime.addEventListener("input", () => {
+      row.time_offset_min = inTime.value === "" ? null : Number(inTime.value);
+      markRowDirty(row);
+    });
     tdTime.appendChild(inTime);
     tr.appendChild(tdTime);
 
@@ -187,7 +225,10 @@ function renderStepRows() {
     const inAmt = document.createElement("input");
     inAmt.type = "number"; inAmt.min = "0"; inAmt.step = "0.1";
     inAmt.value = row.amount_ml ?? "";
-    inAmt.addEventListener("input", () => (row.amount_ml = inAmt.value === "" ? null : Number(inAmt.value)));
+    inAmt.addEventListener("input", () => {
+      row.amount_ml = inAmt.value === "" ? null : Number(inAmt.value);
+      markRowDirty(row);
+    });
     tdAmt.appendChild(inAmt);
     tr.appendChild(tdAmt);
 
@@ -196,9 +237,12 @@ function renderStepRows() {
     const inNote = document.createElement("input");
     inNote.type = "text"; inNote.value = row.note || "";
     inNote.placeholder = "操作方式/注意";
-    inNote.addEventListener("input", () => (row.note = inNote.value));
+    inNote.addEventListener("input", () => { row.note = inNote.value; markRowDirty(row); });
     tdNote.appendChild(inNote);
     tr.appendChild(tdNote);
+
+    // 安全确认
+    tr.appendChild(buildSafetyCell(row, idx));
 
     // 删除
     const tdDel = document.createElement("td");
@@ -214,6 +258,162 @@ function renderStepRows() {
 
     body.appendChild(tr);
   });
+  renderSafetyBar();
+  updateSimulateGate();
+}
+
+/* ---------- 每步安全确认单元格 ---------- */
+
+function buildSafetyCell(row, idx) {
+  const td = document.createElement("td");
+  td.className = "safety-cell";
+  const planId = currentPlanId();
+  const status = rowSafetyStatus(row);
+  const [sLabel, sCls] = safetyStatusMeta[status] || ["未确认", "blocked"];
+
+  const head = document.createElement("div");
+  head.className = "safety-head";
+  head.innerHTML = `<span class="badge badge-${sCls}">${sLabel}</span>`;
+  if (status === "confirmed" && row.safety?.confirmed_at) {
+    head.innerHTML += `<span class="item-meta" title="确认时间">🕐 ${fmtTime(row.safety.confirmed_at)}</span>`;
+  }
+  td.appendChild(head);
+
+  if (!planId) {
+    const hint = document.createElement("div");
+    hint.className = "item-meta";
+    hint.textContent = "保存方案后可逐项确认";
+    td.appendChild(hint);
+    return td;
+  }
+
+  const selected = new Set(row.safety?.measures || []);
+  const chips = document.createElement("div");
+  chips.className = "safety-chips";
+  const enabled = status !== "confirmed";
+  safetyMeasures().forEach((m) => {
+    const chip = document.createElement("label");
+    chip.className = "safety-chip" + (selected.has(m.key) ? " on" : "");
+    chip.title = m.description;
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = selected.has(m.key);
+    cb.disabled = !enabled;
+    cb.addEventListener("change", () => {
+      if (cb.checked) selected.add(m.key); else selected.delete(m.key);
+      chip.classList.toggle("on", cb.checked);
+    });
+    chip.appendChild(cb);
+    chip.appendChild(document.createTextNode(m.label));
+    chips.appendChild(chip);
+  });
+  td.appendChild(chips);
+
+  const note = document.createElement("input");
+  note.type = "text";
+  note.className = "safety-note-input";
+  note.placeholder = "安全备注（个体防护/应急措施）";
+  note.value = row.safety?.safety_note || "";
+  note.disabled = status === "confirmed";
+  td.appendChild(note);
+
+  if (status !== "confirmed") {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn-small btn-primary safety-confirm-btn";
+    btn.textContent = status === "stale" ? "✓ 重新确认" : "✓ 确认安全";
+    btn.addEventListener("click", async () => {
+      const measures = [...selected];
+      if (!measures.length) { toast("请至少勾选一项防护措施", true); return; }
+      btn.disabled = true;
+      try {
+        const updated = await api(
+          `/api/plans/${planId}/steps/${row.order_index}/safety`,
+          { method: "PUT", body: { measures, safety_note: note.value.trim() || null } },
+        );
+        await syncEditedPlan(updated);
+        toast(`第 ${row.order_index + 1} 步安全已确认`);
+      } catch (err) {
+        toast(err.message, true);
+        btn.disabled = false;
+      }
+    });
+    td.appendChild(btn);
+  } else {
+    const undo = document.createElement("button");
+    undo.type = "button";
+    undo.className = "btn btn-small";
+    undo.textContent = "修改确认";
+    undo.title = "重新勾选防护措施";
+    undo.addEventListener("click", () => {
+      row.safety.status = "stale";
+      row.safetyDirty = false;
+      renderStepRows();
+    });
+    td.appendChild(undo);
+  }
+  return td;
+}
+
+/* 用服务端返回的最新方案状态同步编辑器（步骤行 + 方案列表），不打断输入焦点 */
+async function syncEditedPlan(plan) {
+  state.stepRows = plan.steps.map((s) => makeStepRow({
+    order_index: s.order_index,
+    time_offset_min: s.time_offset_min,
+    amount_ml: s.amount_ml,
+    reagent_id: s.reagent_id,
+    reagent_name: s.reagent_name,
+    categories: s.categories,
+    note: s.note,
+    safety: s.safety,
+  }));
+  // 编辑器名称/说明保留当前输入，仅同步步骤与安全状态
+  renderStepRows();
+  state.plans = state.plans.map((p) => (p.id === plan.id ? plan : p));
+  renderPlanList();
+  refreshRvPlanSelect();
+}
+
+function safetyCounts() {
+  const counts = { confirmed: 0, stale: 0, unconfirmed: 0 };
+  state.stepRows.forEach((r) => { counts[rowSafetyStatus(r)] += 1; });
+  return counts;
+}
+
+function renderSafetyBar() {
+  const box = $("#safetyBar");
+  if (!box) return;
+  const total = state.stepRows.length;
+  const c = safetyCounts();
+  const allConfirmed = total > 0 && c.confirmed === total;
+  const planId = currentPlanId();
+  box.classList.remove("ok", "warn");
+  if (!planId) {
+    box.className = "safety-bar";
+    box.innerHTML = `<span>🛡️ 保存方案后可按步骤勾选防护措施并确认；<b>正式推演前须完成全部步骤的安全确认</b>，预检不受此限制。</span>`;
+    return;
+  }
+  box.className = "safety-bar " + (allConfirmed ? "ok" : "warn");
+  box.innerHTML = `
+    <span><b>🛡️ 步骤安全确认</b></span>
+    <span class="badge badge-ok">已确认 ${c.confirmed}</span>
+    <span class="badge badge-medium">待复核 ${c.stale}</span>
+    <span class="badge badge-blocked">未确认 ${c.unconfirmed}</span>
+    <span class="item-meta">${allConfirmed
+      ? "全部步骤已确认，可以正式推演"
+      : `还差 ${total - c.confirmed} 步，正式推演将被拦截（预检不受限）`}</span>`;
+}
+
+function updateSimulateGate() {
+  const btn = $("#btnSimulateSaved");
+  if (!btn) return;
+  const planId = currentPlanId();
+  if (!planId) { btn.disabled = true; return; }
+  const total = state.stepRows.length;
+  const c = safetyCounts();
+  const ready = total > 0 && c.confirmed === total;
+  btn.disabled = !ready;
+  btn.title = ready ? "" : "请先在每一步勾选防护措施并完成安全确认";
 }
 
 function collectPlanPayload() {
@@ -257,23 +457,25 @@ function resetPlanForm() {
   state.report = null;
   state.stepRows = [makeStepRow()];
   renderStepRows();
-}
-
-$("#planForm").addEventListener("submit", async (e) => {
+}$("#planForm").addEventListener("submit", async (e) => {
   e.preventDefault();
   try {
     const payload = collectPlanPayload();
     const id = $("#planId").value;
     if (id) {
-      await api(`/api/plans/${id}`, { method: "PUT", body: payload });
-      toast("方案已更新");
+      const updated = await api(`/api/plans/${id}`, { method: "PUT", body: payload });
+      $("#planName").value = updated.name;
+      $("#planDesc").value = updated.description || "";
+      await syncEditedPlan(updated);
+      toast("方案已更新：内容变更的步骤需重新进行安全确认");
     } else {
       const created = await api("/api/plans", { method: "POST", body: payload });
       $("#planId").value = created.id;
       $("#planFormTitle").textContent = "编辑配液方案";
       $("#btnSavePlan").textContent = "💾 保存修改";
       $("#btnSimulateSaved").classList.remove("hidden");
-      toast("方案已保存");
+      await syncEditedPlan(created);
+      toast("方案已保存，可逐步骤确认安全措施后正式推演");
     }
     await loadPlans();
   } catch (err) {
@@ -296,10 +498,16 @@ $("#btnDryRun").addEventListener("click", async () => {
 $("#btnSimulateSaved").addEventListener("click", async () => {
   const id = $("#planId").value;
   if (!id) return;
+  const c = safetyCounts();
+  if (state.stepRows.length && c.confirmed !== state.stepRows.length) {
+    toast(`仍有 ${state.stepRows.length - c.confirmed} 步未完成安全确认，不能正式推演；可使用「预检（不保存）」`, true);
+    return;
+  }
   try {
     const report = await api(`/api/plans/${id}/simulate?persist=true`, { method: "POST" });
     state.report = report;
     renderReport(report, { editable: true });
+    loadPlans();
     loadRuns();
     toast("推演完成并已记录");
   } catch (err) {
@@ -323,17 +531,29 @@ function editPlan(plan) {
     reagent_name: s.reagent_name,
     categories: s.categories,
     note: s.note,
+    safety: s.safety,
   }));
   renderStepRows();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 async function simulatePlan(plan) {
+  const sc = plan.safety_confirmation;
+  if (sc && !sc.all_confirmed) {
+    toast(`该方案还有 ${sc.pending_count} 步未完成安全确认，请在编辑器中逐步骤确认后再正式推演（预检不受限）`, true);
+    editPlan(plan);
+    return;
+  }
   editPlan(plan);
-  const report = await api(`/api/plans/${plan.id}/simulate?persist=true`, { method: "POST" });
-  state.report = report;
-  renderReport(report, { editable: true });
-  loadRuns();
+  try {
+    const report = await api(`/api/plans/${plan.id}/simulate?persist=true`, { method: "POST" });
+    state.report = report;
+    renderReport(report, { editable: true });
+    loadPlans();
+    loadRuns();
+  } catch (err) {
+    toast(err.message, true);
+  }
 }
 
 function renderPlanList() {
@@ -349,8 +569,13 @@ function renderPlanList() {
       const effLine = ev
         ? `<span class="badge badge-ok">规则 v${ev.version_no} 生效中</span>`
         : '<span class="badge badge-blocked">全局规则图</span>';
+      const sc = p.safety_confirmation;
+      const safetyLine = !sc ? "" : sc.all_confirmed
+        ? `<span class="badge badge-ok">🛡️ 安全确认 ${sc.confirmed}/${sc.total_steps}</span>`
+        : `<span class="badge ${sc.stale ? "badge-medium" : "badge-blocked"}"
+             title="正式推演前必须完成全部步骤安全确认">🛡️ 待确认 ${sc.total_steps - sc.confirmed}/${sc.total_steps}</span>`;
       li.innerHTML = `
-        <div class="item-title">${escapeHtml(p.name)} ${effLine}</div>
+        <div class="item-title">${escapeHtml(p.name)} ${effLine} ${safetyLine}</div>
         <div class="item-meta"><span>🕐 ${p.steps.length} 步</span><span>更新于 ${fmtTime(p.updated_at)}</span></div>
         ${p.description ? `<div class="item-meta">${escapeHtml(p.description)}</div>` : ""}
       `;
@@ -447,6 +672,7 @@ function renderReport(report, { editable = false, hideExport = false, container 
         ${report.plan_id && !editable2.hideExport ? `<button class="btn btn-small" id="btnExportShow">⬇ 导出 JSON</button>` : ""}
       </div>
     </div>
+    ${renderSafetyReportSection(report)}
     <div class="report-grid">
       <div class="card"><h2 style="margin-bottom:12px">⏱️ 逐步推演时间轴</h2><ul class="timeline">${
         report.timeline.map(renderTimelineItem).join("")
@@ -473,10 +699,51 @@ function renderReport(report, { editable = false, hideExport = false, container 
   wrap.scrollIntoView?.({ behavior: "smooth", block: "start" });
 }
 
+function renderSafetyReportSection(report) {
+  const sc = report.safety_confirmation;
+  if (!sc) return "";
+  const [label, cls] = sc.all_confirmed
+    ? ["全部步骤已完成安全确认", "ok"]
+    : ["仍有步骤未完成安全确认", sc.stale ? "medium" : "blocked"];
+  const gateHint = sc.gate === "required_before_formal_run"
+    ? "正式推演 / 导出要求全部步骤已确认"
+    : (sc.gate_label || "预检不强制安全确认");
+  return `
+    <div class="card safety-report-card">
+      <div class="card-head">
+        <h2>🛡️ 加液步骤安全确认</h2>
+        <span class="badge badge-${cls}">${escapeHtml(label)}</span>
+      </div>
+      <p class="hint">${escapeHtml(gateHint)}：
+        <span class="badge badge-ok">已确认 ${sc.confirmed}</span>
+        <span class="badge badge-medium">待复核 ${sc.stale}</span>
+        <span class="badge badge-blocked">未确认 ${sc.unconfirmed}</span>
+        （共 ${sc.total_steps} 步）</p>
+      <ul class="safety-step-list">
+        ${sc.steps.map((s) => {
+          const [sLabel, sCls] = safetyStatusMeta[s.status] || ["未确认", "blocked"];
+          return `<li>
+            <span class="badge badge-${sCls}">第 ${s.order_index} 步 · ${sLabel}</span>
+            ${s.measures.length ? s.measures.map((m) => `<span class="badge badge-low">${escapeHtml(safetyMeasureLabel(m))}</span>`).join(" ") : '<span class="item-meta">未勾选防护措施</span>'}
+            ${s.safety_note ? `<span class="item-meta">📝 ${escapeHtml(s.safety_note)}</span>` : ""}
+          </li>`;
+        }).join("")}
+      </ul>
+    </div>`;
+}
+
 function renderTimelineItem(t) {
   const findings = t.finding_ids
     .map((fid) => window.__lastReport?.findings?.find((x) => x.id === fid))
     .filter(Boolean);
+  const sf = t.safety;
+  const safetyLine = !sf ? "" : (() => {
+    const [sLabel, sCls] = safetyStatusMeta[sf.status] || ["未确认", "blocked"];
+    return `<div class="tl-safety">🛡️ <span class="badge badge-${sCls}">${sLabel}</span>
+      ${sf.measures.map((m) => `<span class="badge badge-low">${escapeHtml(safetyMeasureLabel(m))}</span>`).join(" ")}
+      ${sf.safety_note ? `<span class="item-meta">${escapeHtml(sf.safety_note)}</span>` : ""}
+    </div>`;
+  })();
   return `
     <li class="tl-item ${t.state}">
       <span class="tl-dot"></span>
@@ -491,6 +758,7 @@ function renderTimelineItem(t) {
           ${(t.reagent_categories || []).map((c) => escapeHtml(catLabel(c))).join(" / ")}
           ${t.note ? " · " + escapeHtml(t.note) : ""}
         </div>
+        ${safetyLine}
         <div class="tl-findings">
           ${findings.map((f) => `
             <button type="button" class="mini-rule ${f.severity}" data-fid="${f.id}">
@@ -1878,12 +2146,22 @@ function fmtTime(iso) {
 
 /* ---------------- 启动 ---------------- */
 
+async function loadSafetyMeasures() {
+  try {
+    const data = await api("/api/plans/safety-measures");
+    state.safetyMeasures = data.measures || [];
+  } catch {
+    state.safetyMeasures = SAFETY_FALLBACK_MEASURES;
+  }
+}
+
 (async function init() {
   state.stepRows = [makeStepRow()];
   renderStepRows();
   renderCategoryChips();
   try {
-    await Promise.all([loadReagents(), loadPlans(), loadRules()]);
+    await Promise.all([loadSafetyMeasures(), loadReagents(), loadPlans(), loadRules()]);
+    renderStepRows();
   } catch (err) {
     toast("初始化失败：" + err.message, true);
   }

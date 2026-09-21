@@ -87,6 +87,7 @@ class StepOut(BaseModel):
     amount_ml: Optional[float]
     note: Optional[str]
     categories: list[str] = []  # 由路由填充
+    safety: Optional[dict] = None  # 该步骤的安全确认状态（由路由填充）
 
 
 class PlanOut(PlanBase):
@@ -97,6 +98,25 @@ class PlanOut(PlanBase):
     updated_at: datetime
     steps: list[StepOut]
     effective_rule_version: Optional[dict] = None  # 当前生效规则版本摘要（None=使用全局规则图）
+    safety_confirmation: Optional[dict] = None  # 全步骤安全确认摘要与逐步骤状态
+
+
+# ---------- 加液步骤安全确认 ----------
+
+SafetyMeasureKey = Literal["goggles", "fume_hood", "gloves", "lab_coat"]
+
+
+class StepSafetyIn(BaseModel):
+    measures: list[SafetyMeasureKey] = Field(
+        min_length=1,
+        description="已落实的防护措施（至少勾选一项：护目镜 / 通风 / 手套 / 实验服）",
+    )
+    safety_note: Optional[str] = Field(default=None, max_length=2000)
+
+    @field_validator("measures")
+    @classmethod
+    def _dedup(cls, v):
+        return list(dict.fromkeys(v))
 
 
 # ---------- 规则 ----------

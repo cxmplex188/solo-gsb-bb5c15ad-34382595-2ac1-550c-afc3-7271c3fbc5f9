@@ -12,6 +12,11 @@
 支持方案保存、历史推演记录、规则图升级后的**版本差异比对**，一键**导出 JSON 结果**，
 规则图以 YAML 声明式维护并提供网页可视化。
 
+**步骤安全确认（v1.2 新增）**：配液方案编辑器中可对每个加液步骤勾选防护措施
+（护目镜 / 通风 / 手套 / 实验服）并填写安全备注；**保存正式推演（含导出）前必须完成
+全部步骤确认**。步骤内容或试剂变更后，受影响步骤的确认会被自动清除并标记**待复核**；
+预检（dry-run / 不落盘预览）不受此门槛限制。方案详情、推演报告与导出 JSON 均展示确认状态。
+
 **规则版本（v1.1 新增）**：同一方案的规则支持**创建版本 → 编辑草稿 → 发布 → 停用**的完整生命周期，
 每版保留全部规则的严重级别依据与创建 / 发布 / 停用 / 变更时间；方案详情可查看当前生效状态并
 按版本比较差异。**发布后判定接口只读取当前生效版本快照，停用后不再参与判定**（回落全局限定规则图）。
@@ -66,9 +71,12 @@ uvicorn app.main:app --reload --port 8000
 
 1. 打开 **📋 配液方案** 页，左侧是方案编辑器，点击「＋ 添加步骤」按时间排列加液步骤；
    每步可从档案库选择试剂，或直接填写"临时试剂 + 类别"。
-2. 点击 **▶ 预检（不保存）** 立即推演；或 **💾 保存方案** 后在方案卡片上点 **⚡ 推演**。
+2. 点击 **▶ 预检（不保存）** 可随时推演；或 **💾 保存方案** 后在每一步的
+   **🛡️ 安全确认** 栏勾选防护措施（护目镜 / 通风 / 手套 / 实验服）、填写安全备注并逐步骤确认，
+   **全部步骤确认后** 才能点 **⚡ 保存并推演 / 推演** 做正式推演（预检不受此限制）。
 3. 查看报告：
    - 顶部横幅给出**首次危险**与受影响/阻断步骤汇总；
+   - 横幅下方的 **🛡️ 安全确认** 卡片与逐步时间轴同步展示每步确认状态、措施与备注；
    - 左侧**逐步时间轴**展示每一步是"相容 / 警示 / 严重 / 已阻断"；
    - 右侧列出全部**命中规则**，点击任意一条查看反应方程式、机理、参考文献与参与步骤。
 4. 点击 **导出 JSON** 下载完整推演报告；所有推演自动保存在 **🗂️ 推演记录** 中，可回溯、可再导出。
@@ -206,7 +214,80 @@ uvicorn app.main:app --reload --port 8000
 
 ---
 
-## 五、导出的 JSON 结果结构
+## 五、加液步骤安全确认（正式推演前的强制门槛）
+
+> 场景：把"知道有风险"变成"已落实防护"。每个加液步骤在正式推演前都必须由操作者
+> 明确确认本次操作的个体防护与环境措施，防止带着未评审步骤直接进入正式推演与留档。
+
+在 **📋 配液方案** 编辑器中，每个加液步骤都有一列 **🛡️ 安全确认**（需先保存方案）：
+
+- 从后端下发的防护措施目录中**至少勾选一项**：护目镜 `goggles`、通风 `fume_hood`、
+  手套 `gloves`、实验服 `lab_coat`（`GET /api/plans/safety-measures` 获取，含中文说明）；
+- 可填写**安全备注**（个体防护选型、应急措施、双人操作等），确认后随步骤状态保存；
+- 编辑器底部汇总条实时显示 **已确认 / 待复核 / 未确认** 计数，未全部确认时
+  「⚡ 保存并推演」按钮禁用并给出提示。
+
+### 确认状态
+
+| 状态 | 含义 |
+| --- | --- |
+| `unconfirmed` 未确认 | 新步骤 / 新方案，从未做过确认 |
+| `confirmed` 已确认 | 已勾选措施并确认，记录确认时间 |
+| `stale` 待复核 | 步骤内容或引用试剂在确认后发生变更，确认被自动清除，需重新确认 |
+
+### 变更后自动失效（无需人工记忆）
+
+- **步骤变更**（保存方案时整体替换步骤）：以 `(方案, 步骤序号)` 为稳定键比对**内容指纹**
+  （试剂身份 / 名称、类别、时刻、用量、备注）。同序号且指纹不变 → 保留确认；
+  指纹变化 → 清空措施与备注并标记 `stale`；新增步骤为 `unconfirmed`；删除步骤的确认一并删除；
+  步骤重排导致同序号内容对不上，同样进入待复核。
+- **试剂档案变更**（`PUT /api/reagents/{id}`，含类别 / 名称 / 浓度等）：所有引用该试剂的
+  已确认步骤自动标记 `stale`。
+
+### 门槛口径（强约束）
+
+1. **正式推演** `POST /api/plans/{id}/simulate?persist=true` 与
+   **实时导出** `GET /api/plans/{id}/export`：要求全部步骤 `confirmed`，否则返回
+   `409`，错误信息列出未确认 / 待复核的步骤序号；
+2. **预检不受限制**：`POST /api/plans/simulate-dry` 与
+   `POST /api/plans/{id}/simulate?persist=false`（含规则版本草稿预览）始终放行，
+   报告里仅附带 `gate=not_enforced` 的确认快照；
+3. 历史推演报告是**自包含快照**：报告 JSON 含 `safety_confirmation` 汇总，
+   时间轴每步带 `safety`（状态 / 措施 / 备注 / 确认时间），后续步骤变更不影响旧记录。
+
+### HTTP API
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/plans/safety-measures` | 防护措施目录（key / 中文标签 / 说明） |
+| GET | `/api/plans[/{id}]` | 方案与步骤序列化中带 `safety`；方案对象额外带 `safety_confirmation` 摘要 |
+| PUT | `/api/plans/{id}/steps/{order_index}/safety` | 确认（或重新确认）某步骤，body：`measures`（≥1 项）+ `safety_note` |
+
+**4xx 约定**：方案 / 步骤不存在 → `404`；未勾选措施（空数组）或措施 key 非法 → `422`；
+正式推演 / 导出时仍有步骤未确认或待复核 → `409`。
+
+方案详情中的摘要结构：
+
+```json
+{
+  "safety_confirmation": {
+    "total_steps": 3, "confirmed": 2, "stale": 1, "unconfirmed": 0,
+    "pending_count": 1, "all_confirmed": false,
+    "measures_catalog": [
+      { "key": "goggles", "label": "护目镜", "description": "佩戴防溅护目镜/面屏" }
+    ],
+    "steps": [
+      { "order_index": 0, "status": "confirmed", "status_label": "已确认",
+        "measures": ["goggles", "fume_hood", "gloves"], "safety_note": "通风橱内操作",
+        "confirmed_at": "2026-09-21T10:00:00+00:00", "updated_at": "…" }
+    ]
+  }
+}
+```
+
+---
+
+## 六、导出的 JSON 结果结构
 
 `GET /api/plans/{id}/export`（实时推演）或 `GET /api/runs/{id}/export`（历史记录）：
 
@@ -238,8 +319,19 @@ uvicorn app.main:app --reload --port 8000
   "timeline": [
     { "order_index": 1, "reagent_name": "盐酸", "state": "danger",
       "state_label": "发生严重反应", "finding_ids": ["F001"],
+      "safety": { "status": "confirmed", "status_label": "已确认",
+                  "measures": ["goggles", "fume_hood", "gloves"],
+                  "safety_note": "通风橱内操作", "confirmed_at": "……" },
       "interactions": [ { "rule_id": "R001", "with_reagent": "氰化钾" } ] }
   ],
+  "safety_confirmation": {
+    "gate": "required_before_formal_run",   // 预检为 not_enforced
+    "gate_label": "正式推演前须全部确认",
+    "all_confirmed": true, "total_steps": 3,
+    "confirmed": 3, "stale": 0, "unconfirmed": 0,
+    "steps": [ { "order_index": 0, "status": "confirmed",
+                 "measures": ["goggles", "fume_hood", "gloves"], "safety_note": "……" } ]
+  },
   "findings": [
     { "id": "F001", "rule_id": "R001", "severity": "high",
       "incoming_step": 1, "incoming_reagent": "盐酸", "incoming_category": "strong_acid",
@@ -253,11 +345,12 @@ uvicorn app.main:app --reload --port 8000
 > `rule_scope=global` 时 `rule_revision` 为 YAML 版本号（如 `2026.09`）、无 `rule_version_id`；
 > `rule_scope=plan_version` 时 `rule_revision` 为 `plan{方案ID}-rv{版本号}`，
 > `rule_version_id` 为对应版本。报告是自包含快照：版本后续被替代 / 停用 / 删除规则，
-> 历史记录与导出文件仍保留当时的判定依据。
+> 历史记录与导出文件仍保留当时的判定依据；`safety_confirmation` 与时间轴每步的 `safety`
+> 同样是推演当时的安全确认快照（详见第五章）。
 
 ---
 
-## 六、版本差异视图（规则升级影响评估）
+## 七、版本差异视图（规则升级影响评估）
 
 当规则图升级（修改 `rules.yaml` 重启、网页停用/改级、追加自定义规则）后，对**同一方案**重新推演，
 即可在「🗂️ 推演记录」中比较新旧两条记录。对齐口径为
@@ -314,19 +407,22 @@ uvicorn app.main:app --reload --port 8000
 
 ---
 
-## 七、HTTP API 速览
+## 八、HTTP API 速览
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/reagents?q=` | 试剂列表（可按名称/CAS/分子式搜索） |
 | POST/PUT/DELETE | `/api/reagents[/{id}]` | 试剂增改删（被步骤引用时拒绝删除） |
-| GET/POST | `/api/plans` | 方案列表 / 新建（含步骤） |
-| GET/PUT/DELETE | `/api/plans/{id}` | 方案详情（含 `effective_rule_version` 当前生效版本） / 修改 / 删除 |
-| POST | `/api/plans/{id}/simulate?persist=true` | 按当前生效规则版本推演（无版本则全局图）并可选保存记录 |
+| GET/POST | `/api/plans` | 方案列表 / 新建（含步骤；详情带 `safety_confirmation`） |
+| GET/PUT/DELETE | `/api/plans/{id}` | 方案详情（含 `effective_rule_version` 与安全确认摘要） / 修改 / 删除 |
+| GET | `/api/plans/safety-measures` | **防护措施目录（护目镜/通风/手套/实验服）** |
+| PUT | `/api/plans/{id}/steps/{n}/safety` | **确认第 n 步防护措施与安全备注（至少一项措施）** |
+| POST | `/api/plans/{id}/simulate?persist=true` | 正式推演并保存记录：**须全部步骤安全确认，否则 409** |
+| POST | `/api/plans/{id}/simulate?persist=false` | 预览推演（不落盘，不设安全门槛），可带 `rule_version_id` 预览草稿 |
 | GET/POST/PUT/DELETE | `/api/plans/{id}/rule-versions[/{vid}[/publish\|/deactivate]]` | **规则版本：创建 / 编辑草稿 / 发布 / 停用 / 删除** |
 | GET | `/api/plans/{id}/rule-versions/diff?base=&target=` | **规则版本差异（支持 `global`）** |
-| POST | `/api/plans/simulate-dry` | 不保存方案，直接预检（使用全局图） |
-| GET | `/api/plans/{id}/export` | 实时推演并下载 JSON |
+| POST | `/api/plans/simulate-dry` | 不保存方案，直接预检（使用全局图，**不受安全确认门槛限制**） |
+| GET | `/api/plans/{id}/export` | 正式推演并下载 JSON（**同样要求全部步骤已确认**） |
 | GET | `/api/rules[?active_only=true]` | 规则边 + 类别元信息 + 版本号 |
 | POST | `/api/rules` | 追加自定义规则 |
 | PATCH/DELETE | `/api/rules/{id}` | 启停 / 改级别（自定义规则可删） |
@@ -342,7 +438,7 @@ uvicorn app.main:app --reload --port 8000
 
 ---
 
-## 八、目录结构
+## 九、目录结构
 
 ```
 .
@@ -350,10 +446,11 @@ uvicorn app.main:app --reload --port 8000
 │   ├── main.py            # FastAPI 入口：建库、同步规则图、挂载网页
 │   ├── config.py           # 路径 / DB 配置（环境变量可覆盖）
 │   ├── database.py         # SQLite 引擎与会话
-│   ├── models.py           # ORM：试剂 / 方案 / 步骤 / 规则 / 推演记录
+│   ├── models.py           # ORM：试剂 / 方案 / 步骤 / 安全确认 / 规则 / 推演记录
 │   ├── schemas.py          # Pydantic 请求响应模型
 │   ├── rules_store.py      # 读取并同步 YAML 规则图（全局限定规则图）
 │   ├── versioning.py       # 方案规则版本：快照、草稿/发布/停用状态机、版本差异
+│   ├── safety.py           # 步骤安全确认：措施目录、内容指纹、变更失效与门槛汇总
 │   ├── engine.py           # 相容性逐步推演引擎（核心算法）
 │   ├── deduce.py           # 方案 → 规则版本解析 → 引擎输入 → 报告 → 落盘
 │   ├── diffing.py          # 两条历史记录的版本差异对齐与汇总
@@ -370,7 +467,7 @@ uvicorn app.main:app --reload --port 8000
 └── requirements.txt
 ```
 
-## 九、配置项
+## 十、配置项
 
 | 环境变量 | 默认 | 说明 |
 | --- | --- | --- |

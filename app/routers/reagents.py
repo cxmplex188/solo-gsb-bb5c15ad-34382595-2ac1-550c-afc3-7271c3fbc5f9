@@ -4,7 +4,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from .. import models
+from .. import models, safety
 from ..database import get_db
 from ..schemas import ReagentCreate, ReagentOut, ReagentUpdate
 
@@ -73,6 +73,8 @@ def update_reagent(
         reagent.categories = json.dumps(data.pop("categories"), ensure_ascii=False)
     for key, value in data.items():
         setattr(reagent, key, value)
+    # 试剂属性（名称/类别/浓度等）变更：引用该试剂的步骤安全确认自动失效、标记待复核
+    safety.invalidate_for_reagent(db, reagent_id)
     db.commit()
     db.refresh(reagent)
     return reagent

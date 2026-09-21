@@ -65,6 +65,38 @@ class Step(Base):
     reagent: Mapped["Reagent | None"] = relationship(back_populates="steps")
 
 
+class StepSafetyConfirmation(Base):
+    """单个加液步骤的安全确认（防护措施勾选 + 备注）。
+
+    以 (plan_id, order_index) 为稳定键：方案步骤被整体替换时，
+    同位置且内容指纹未变的确认得以保留；步骤内容或试剂变更后，
+    对应行被重置为 stale（待复核），正式推演前必须重新确认。
+    """
+
+    __tablename__ = "step_safety_confirmations"
+    __table_args__ = (
+        UniqueConstraint(
+            "plan_id", "order_index", name="uq_step_safety_plan_order"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_id: Mapped[int] = mapped_column(
+        ForeignKey("plans.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="unconfirmed")
+    # confirmed=已确认 / stale=内容变更后待复核 / unconfirmed=从未确认
+    measures: Mapped[str] = mapped_column(Text, default="[]")  # 防护措施 key JSON 数组
+    safety_note: Mapped[str | None] = mapped_column(Text)
+    content_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_utcnow, onupdate=_utcnow
+    )
+
+
 class Rule(Base):
     __tablename__ = "rules"
 
