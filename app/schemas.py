@@ -51,6 +51,20 @@ class ReagentOut(ReagentBase):
 
 # ---------- 步骤 / 方案 ----------
 
+def _clean_measures(cls, value):
+    """安全措施勾选：去空白、去重、限量，允许预置之外的自定义 key。"""
+    if value is None:
+        return value
+    out: list[str] = []
+    for item in value:
+        key = str(item).strip()[:32]
+        if key and key not in out:
+            out.append(key)
+    if len(out) > 16:
+        raise ValueError("每个步骤的安全措施最多 16 项")
+    return out
+
+
 class StepIn(BaseModel):
     reagent_id: Optional[int] = None
     reagent_name: Optional[str] = None  # 未建档的临时试剂
@@ -59,6 +73,14 @@ class StepIn(BaseModel):
     time_offset_min: Optional[float] = Field(default=None, ge=0)
     amount_ml: Optional[float] = Field(default=None, ge=0)
     note: Optional[str] = None
+    # 安全确认（可选）：措施勾选 / 安全备注 / 确认标记 / 待复核标记；
+    # 全部缺省时保存接口会按内容指纹继承变更前的确认状态
+    safety_measures: Optional[list[str]] = None
+    safety_note: Optional[str] = Field(default=None, max_length=500)
+    safety_confirmed: Optional[bool] = None
+    safety_stale: Optional[bool] = None
+
+    _clean = field_validator("safety_measures", mode="before")(_clean_measures)
 
 
 class PlanBase(BaseModel):
@@ -87,6 +109,22 @@ class StepOut(BaseModel):
     amount_ml: Optional[float]
     note: Optional[str]
     categories: list[str] = []  # 由路由填充
+    # 安全确认状态（由路由按内容指纹派生填充）
+    safety_measures: list[str] = []
+    safety_note: Optional[str] = None
+    safety_confirmed: bool = False
+    safety_stale: bool = False
+    safety_confirmed_at: Optional[datetime] = None
+
+
+class StepSafetyUpdate(BaseModel):
+    """细粒度安全确认：对单个已保存步骤勾选措施并确认 / 取消确认。"""
+
+    safety_measures: list[str] = Field(default_factory=list)
+    safety_note: Optional[str] = Field(default=None, max_length=500)
+    confirmed: bool = False
+
+    _clean = field_validator("safety_measures", mode="before")(_clean_measures)
 
 
 class PlanOut(PlanBase):
@@ -97,6 +135,7 @@ class PlanOut(PlanBase):
     updated_at: datetime
     steps: list[StepOut]
     effective_rule_version: Optional[dict] = None  # 当前生效规则版本摘要（None=使用全局规则图）
+    safety_summary: Optional[dict] = None  # 步骤安全确认摘要（见 safety.plan_safety_summary）
 
 
 # ---------- 规则 ----------

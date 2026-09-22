@@ -99,6 +99,17 @@ const sevLabel = { low: "提示", medium: "警示", high: "严重" };
 
 /* ---------------- 方案编辑 ---------------- */
 
+// 步骤安全确认：预置措施（与后端 safety.MEASURE_PRESETS 对应，允许自定义 key 由 API 传入）
+const SAFETY_MEASURES = [
+  { key: "goggles", label: "🥽 护目镜" },
+  { key: "gloves", label: "🧤 防护手套" },
+  { key: "ventilation", label: "🌬️ 通风橱/通风" },
+  { key: "lab_coat", label: "🥼 实验服" },
+  { key: "face_shield", label: "😷 防护面罩" },
+  { key: "emergency_shower", label: "🚿 紧急喷淋就绪" },
+];
+const measureLabel = (key) => SAFETY_MEASURES.find((m) => m.key === key)?.label || key;
+
 function makeStepRow(partial = {}) {
   return {
     order_index: partial.order_index ?? state.stepRows.length,
@@ -108,7 +119,102 @@ function makeStepRow(partial = {}) {
     reagent_name: partial.reagent_name ?? "",
     categories: partial.categories ?? [],
     note: partial.note ?? "",
+    // 安全确认状态（随方案保存一并提交）
+    safety_measures: partial.safety_measures ?? [],
+    safety_note: partial.safety_note ?? "",
+    safety_confirmed: partial.safety_confirmed ?? false,
+    safety_stale: partial.safety_stale ?? false,
   };
+}
+
+// 步骤内容或已确认措施变更后：确认立即失效并标记待复核（与后端指纹口径一致）
+function invalidateRowSafety(row) {
+  if (row.safety_confirmed) {
+    row.safety_confirmed = false;
+    row.safety_stale = true;
+  }
+}
+
+function safetyBadgeHtml(row) {
+  if (row.safety_confirmed) return '<span class="badge badge-ok">✅ 已确认</span>';
+  if (row.safety_stale) return '<span class="badge badge-medium">⚠️ 待复核（内容已变更）</span>';
+  return '<span class="badge badge-blocked">⬜ 未确认</span>';
+}
+
+function renderSafetyRow(row, idx) {
+  const tr = document.createElement("tr");
+  tr.className = "safety-row";
+  tr.dataset.idx = idx;
+  const td = document.createElement("td");
+  td.colSpan = 6;
+  td.innerHTML = `
+    <div class="safety-box">
+      <div class="safety-head">
+        <span class="safety-title">🛡️ 安全确认</span>
+        <span class="safety-badge">${safetyBadgeHtml(row)}</span>
+        <label class="switch safety-confirm-label" title="确认本步安全措施已落实">
+          <input type="checkbox" class="safety-confirm" ${row.safety_confirmed ? "checked" : ""} />
+          已确认本步安全措施
+        </label>
+      </div>
+      <div class="safety-measures">
+        ${SAFETY_MEASURES.map((m) => `
+          <span class="chip safety-chip${row.safety_measures.includes(m.key) ? " on" : ""}" data-key="${m.key}">${m.label}</span>`).join("")}
+      </div>
+      <input type="text" class="safety-note" maxlength="500" placeholder="安全备注（如：通风橱内操作，废液单独收集）" value="${escapeHtml(row.safety_note)}" />
+    </div>`;
+  tr.appendChild(td);
+
+  $$(".safety-chip", td).forEach((chip) => {
+    chip.addEventListener("click", () => {
+      const key = chip.dataset.key;
+      const i = row.safety_measures.indexOf(key);
+      if (i >= 0) row.safety_measures.splice(i, 1);
+      else row.safety_measures.push(key);
+      chip.classList.toggle("on");
+      invalidateRowSafety(row);
+      refreshSafetyBadge(tr, row);
+      renderSafetyProgress();
+    });
+  });
+  $(".safety-note", td).addEventListener("input", (e) => {
+    row.safety_note = e.target.value;
+    invalidateRowSafety(row);
+    refreshSafetyBadge(tr, row);
+    renderSafetyProgress();
+  });
+  $(".safety-confirm", td).addEventListener("change", (e) => {
+    row.safety_confirmed = e.target.checked;
+    if (row.safety_confirmed) row.safety_stale = false;
+    refreshSafetyBadge(tr, row);
+    renderSafetyProgress();
+  });
+  return tr;
+}
+
+// 内容输入变更后只刷新徽章与勾选框，避免重绘整行导致输入框失焦
+function refreshSafetyBadge(tr, row) {
+  const badge = $(".safety-badge", tr);
+  if (badge) badge.innerHTML = safetyBadgeHtml(row);
+  const confirmBox = $(".safety-confirm", tr);
+  if (confirmBox) confirmBox.checked = row.safety_confirmed;
+}
+
+function renderSafetyProgress() {
+  const box = $("#safetyProgress");
+  if (!box) return;
+  const rows = state.stepRows;
+  const total = rows.length;
+  const confirmed = rows.filter((r) => r.safety_confirmed).length;
+  const stale = rows.filter((r) => !r.safety_confirmed && r.safety_stale).length;
+  if (!total) { box.innerHTML = ""; return; }
+  const all = confirmed === total;
+  box.className = "safety-progress " + (all ? "ok" : "pending");
+  box.innerHTML = all
+    ? `🛡️ 安全确认 <b>${confirmed}/${total}</b> 步已完成 —— 可以保存正式推演`
+    : `🛡️ 安全确认 <b>${confirmed}/${total}</b> 步已确认` +
+      (stale ? ` · <span class="badge badge-medium">⚠️ ${stale} 步待复核</span>` : "") +
+      ` · <span class="hint-inline">保存正式推演前须完成全部步骤确认（预检不受限）</span>`;
 }
 
 function renderStepRows() {
@@ -138,6 +244,7 @@ function renderStepRows() {
       } else {
         row.reagent_id = null;
       }
+      invalidateRowSafety(row);
       renderStepRows();
     });
     tdReg.appendChild(select);
@@ -148,7 +255,12 @@ function renderStepRows() {
       tmp.placeholder = "临时试剂名（如：新配制的王水）";
       tmp.value = row.reagent_name;
       tmp.style.marginTop = "5px";
-      tmp.addEventListener("input", () => (row.reagent_name = tmp.value));
+      tmp.addEventListener("input", () => {
+        row.reagent_name = tmp.value;
+        invalidateRowSafety(row);
+        refreshSafetyBadge(body.querySelector(`tr.safety-row[data-idx="${idx}"]`), row);
+        renderSafetyProgress();
+      });
       tdReg.appendChild(tmp);
 
       const catInput = document.createElement("input");
@@ -158,6 +270,9 @@ function renderStepRows() {
       catInput.style.marginTop = "5px";
       catInput.addEventListener("input", () => {
         row.categories = catInput.value.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+        invalidateRowSafety(row);
+        refreshSafetyBadge(body.querySelector(`tr.safety-row[data-idx="${idx}"]`), row);
+        renderSafetyProgress();
       });
       tdReg.appendChild(catInput);
     } else {
@@ -178,7 +293,12 @@ function renderStepRows() {
     const inTime = document.createElement("input");
     inTime.type = "number"; inTime.min = "0"; inTime.step = "1";
     inTime.value = row.time_offset_min ?? "";
-    inTime.addEventListener("input", () => (row.time_offset_min = inTime.value === "" ? null : Number(inTime.value)));
+    inTime.addEventListener("input", () => {
+      row.time_offset_min = inTime.value === "" ? null : Number(inTime.value);
+      invalidateRowSafety(row);
+      refreshSafetyBadge(body.querySelector(`tr.safety-row[data-idx="${idx}"]`), row);
+      renderSafetyProgress();
+    });
     tdTime.appendChild(inTime);
     tr.appendChild(tdTime);
 
@@ -187,7 +307,12 @@ function renderStepRows() {
     const inAmt = document.createElement("input");
     inAmt.type = "number"; inAmt.min = "0"; inAmt.step = "0.1";
     inAmt.value = row.amount_ml ?? "";
-    inAmt.addEventListener("input", () => (row.amount_ml = inAmt.value === "" ? null : Number(inAmt.value)));
+    inAmt.addEventListener("input", () => {
+      row.amount_ml = inAmt.value === "" ? null : Number(inAmt.value);
+      invalidateRowSafety(row);
+      refreshSafetyBadge(body.querySelector(`tr.safety-row[data-idx="${idx}"]`), row);
+      renderSafetyProgress();
+    });
     tdAmt.appendChild(inAmt);
     tr.appendChild(tdAmt);
 
@@ -196,7 +321,12 @@ function renderStepRows() {
     const inNote = document.createElement("input");
     inNote.type = "text"; inNote.value = row.note || "";
     inNote.placeholder = "操作方式/注意";
-    inNote.addEventListener("input", () => (row.note = inNote.value));
+    inNote.addEventListener("input", () => {
+      row.note = inNote.value;
+      invalidateRowSafety(row);
+      refreshSafetyBadge(body.querySelector(`tr.safety-row[data-idx="${idx}"]`), row);
+      renderSafetyProgress();
+    });
     tdNote.appendChild(inNote);
     tr.appendChild(tdNote);
 
@@ -213,7 +343,9 @@ function renderStepRows() {
     tr.appendChild(tdDel);
 
     body.appendChild(tr);
+    body.appendChild(renderSafetyRow(row, idx));
   });
+  renderSafetyProgress();
 }
 
 function collectPlanPayload() {
@@ -236,6 +368,10 @@ function collectPlanPayload() {
       reagent_name: r.reagent_id ? null : r.reagent_name.trim(),
       categories: r.reagent_id ? null : r.categories,
       note: r.note || null,
+      safety_measures: r.safety_measures,
+      safety_note: r.safety_note.trim() || null,
+      safety_confirmed: r.safety_confirmed,
+      safety_stale: r.safety_stale,
     })),
   };
 }
@@ -297,6 +433,10 @@ $("#btnSimulateSaved").addEventListener("click", async () => {
   const id = $("#planId").value;
   if (!id) return;
   try {
+    // 先保存当前表单（含各步安全确认），再按已保存内容做正式推演
+    const payload = collectPlanPayload();
+    await api(`/api/plans/${id}`, { method: "PUT", body: payload });
+    await loadPlans();
     const report = await api(`/api/plans/${id}/simulate?persist=true`, { method: "POST" });
     state.report = report;
     renderReport(report, { editable: true });
@@ -323,6 +463,10 @@ function editPlan(plan) {
     reagent_name: s.reagent_name,
     categories: s.categories,
     note: s.note,
+    safety_measures: s.safety_measures || [],
+    safety_note: s.safety_note || "",
+    safety_confirmed: s.safety_confirmed || false,
+    safety_stale: s.safety_stale || false,
   }));
   renderStepRows();
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -349,9 +493,15 @@ function renderPlanList() {
       const effLine = ev
         ? `<span class="badge badge-ok">规则 v${ev.version_no} 生效中</span>`
         : '<span class="badge badge-blocked">全局规则图</span>';
+      const sf = p.safety_summary;
+      const sfLine = !sf || !sf.total_steps
+        ? ""
+        : sf.all_confirmed
+          ? `<span class="badge badge-ok">🛡️ 确认 ${sf.confirmed_steps}/${sf.total_steps}</span>`
+          : `<span class="badge badge-medium" title="正式推演前须完成全部步骤安全确认">🛡️ 确认 ${sf.confirmed_steps}/${sf.total_steps}${sf.stale_steps ? ` · ${sf.stale_steps} 待复核` : ""}</span>`;
       li.innerHTML = `
         <div class="item-title">${escapeHtml(p.name)} ${effLine}</div>
-        <div class="item-meta"><span>🕐 ${p.steps.length} 步</span><span>更新于 ${fmtTime(p.updated_at)}</span></div>
+        <div class="item-meta"><span>🕐 ${p.steps.length} 步</span>${sfLine}<span>更新于 ${fmtTime(p.updated_at)}</span></div>
         ${p.description ? `<div class="item-meta">${escapeHtml(p.description)}</div>` : ""}
       `;
       const actions = document.createElement("div");
@@ -405,6 +555,25 @@ function openPlanVersions(plan) {
 
 /* ---------------- 报告渲染 ---------------- */
 
+// 报告横幅中的步骤安全确认摘要行（预检 / 正式推演 / 历史记录统一展示）
+function renderSafetySummaryLine(report) {
+  const sf = report.safety;
+  if (!sf || !sf.total_steps) return "";
+  const stateBadge = sf.all_confirmed
+    ? '<span class="badge badge-ok">全部已确认</span>'
+    : `<span class="badge badge-medium">存在未确认步骤</span>`;
+  const stale = sf.stale_steps ? ` · <span class="badge badge-medium">⚠️ 待复核 ${sf.stale_steps} 步</span>` : "";
+  const details = (sf.steps || [])
+    .map((s) => {
+      const mark = s.confirmed ? "✅" : s.stale ? "⚠️" : "⬜";
+      const measures = (s.measures || []).map((m) => escapeHtml(measureLabel(m))).join("、");
+      const tip = `${s.reagent_name}${measures ? "：" + measures : ""}${s.note ? "（" + s.note + "）" : ""}`;
+      return `<span class="safety-step-mark" title="${escapeHtml(tip)}">${mark} 第 ${s.order_index} 步</span>`;
+    })
+    .join(" ");
+  return `<p class="item-meta">🛡️ 步骤安全确认 <b>${sf.confirmed_steps}/${sf.total_steps}</b> ${stateBadge}${stale}<br>${details}</p>`;
+}
+
 function renderReport(report, { editable = false, hideExport = false, container = $("#reportWrap") } = {}) {
   const editable2 = { editable, hideExport };
   window.__lastReport = report;
@@ -442,6 +611,7 @@ function renderReport(report, { editable = false, hideExport = false, container 
           <span class="badge badge-medium">警示 ${report.summary.medium}</span>
           <span class="badge badge-low">提示 ${report.summary.low}</span>
         </p>
+        ${renderSafetySummaryLine(report)}
       </div>
       <div class="form-actions" style="flex-direction:column">
         ${report.plan_id && !editable2.hideExport ? `<button class="btn btn-small" id="btnExportShow">⬇ 导出 JSON</button>` : ""}
@@ -477,13 +647,18 @@ function renderTimelineItem(t) {
   const findings = t.finding_ids
     .map((fid) => window.__lastReport?.findings?.find((x) => x.id === fid))
     .filter(Boolean);
+  const safetyBadge = t.safety_confirmed
+    ? '<span class="badge badge-ok" title="本步安全措施已确认">🛡️ 已确认</span>'
+    : t.safety_stale
+      ? '<span class="badge badge-medium" title="内容变更后尚未重新确认">🛡️ 待复核</span>'
+      : '<span class="badge badge-blocked" title="尚未完成安全确认">🛡️ 未确认</span>';
   return `
     <li class="tl-item ${t.state}">
       <span class="tl-dot"></span>
       <div class="tl-body">
         <div class="tl-head">
           <span class="tl-name">第 ${t.order_index} 步 · ${escapeHtml(t.reagent_name)}</span>
-          <span class="badge badge-${t.state === "ok" ? "ok" : t.state}">${t.state_label}</span>
+          <span class="tl-badges">${safetyBadge}<span class="badge badge-${t.state === "ok" ? "ok" : t.state}">${t.state_label}</span></span>
         </div>
         <div class="tl-note">
           ${t.time_offset_min !== null ? `🕐 t=${t.time_offset_min} min · ` : ""}

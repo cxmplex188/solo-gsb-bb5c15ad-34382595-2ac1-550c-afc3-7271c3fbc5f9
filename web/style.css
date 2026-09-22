@@ -156,6 +156,41 @@ textarea { resize: vertical; }
 .switch { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-soft); }
 .switch input { width: auto; }
 
+/* ---------- 步骤安全确认 ---------- */
+.safety-row td {
+  padding: 0 8px 8px 8px;
+  border-bottom: 1px solid var(--line);
+  background: #fafcfd;
+}
+.safety-box {
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  background: #fff;
+}
+.safety-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.safety-title { font-size: 12.5px; font-weight: 600; color: var(--ink-soft); }
+.safety-confirm-label { font-weight: 500; }
+.safety-measures { display: flex; flex-wrap: wrap; gap: 6px; }
+.safety-chip { font-size: 12px; padding: 2px 10px; }
+.safety-note { font-size: 12.5px; padding: 5px 9px; }
+.safety-progress {
+  margin-top: 8px;
+  font-size: 12.5px;
+  border-radius: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  background: var(--medium-bg);
+  color: var(--ink-soft);
+}
+.safety-progress.ok { background: var(--ok-bg); border-color: #bbf7d0; color: var(--ok); }
+.safety-progress .hint-inline { color: var(--ink-soft); }
+.safety-step-mark { white-space: nowrap; margin-right: 6px; }
+.tl-badges { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
 /* ---------- 表格 ---------- */
 .table-wrap { overflow-x: auto; }
 .grid { width: 100%; border-collapse: collapse; font-size: 13px; }

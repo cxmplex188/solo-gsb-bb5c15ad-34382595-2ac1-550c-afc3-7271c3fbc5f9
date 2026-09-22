@@ -36,6 +36,18 @@ def check(name, cond, detail=""):
         print(f"  ✗ {name}  {detail}")
 
 
+def confirm_all_steps(pid, measures=None, note="e2e 确认"):
+    """把方案全部步骤标记为已确认（细粒度安全确认接口），返回步骤数。"""
+    s, plan = call("GET", f"/api/plans/{pid}")
+    assert s == 200, plan
+    for st in plan["steps"]:
+        s, u = call("PUT", f"/api/plans/{pid}/steps/{st['id']}/safety",
+                    {"safety_measures": measures or ["goggles", "gloves"],
+                     "safety_note": note, "confirmed": True})
+        assert s == 200 and u["safety"]["confirmed"] is True, (s, u)
+    return len(plan["steps"])
+
+
 # ---------- 1. 示例①：氰化钾→盐酸→乙醇 ----------
 print("【场景1】氰化物酸化（应第 2 步严重中止）")
 s, r = call("POST", "/api/plans/1/simulate?persist=false")
@@ -132,14 +144,20 @@ s, saved = call("POST", "/api/plans", {
     "name": "测试-持久化",
     "description": "e2e",
     "steps": [
-        {"order_index": 0, "reagent_name": "硫化钠临时", "categories": ["sulfide"], "time_offset_min": 0, "amount_ml": 10},
-        {"order_index": 1, "reagent_name": "盐酸临时", "categories": ["strong_acid"], "time_offset_min": 2, "amount_ml": 5},
-        {"order_index": 2, "reagent_name": "水", "categories": [], "time_offset_min": 9, "amount_ml": 100},
+        {"order_index": 0, "reagent_name": "硫化钠临时", "categories": ["sulfide"], "time_offset_min": 0, "amount_ml": 10,
+         "safety_measures": ["goggles", "gloves"], "safety_note": "通风橱内操作", "safety_confirmed": True},
+        {"order_index": 1, "reagent_name": "盐酸临时", "categories": ["strong_acid"], "time_offset_min": 2, "amount_ml": 5,
+         "safety_measures": ["ventilation"], "safety_confirmed": True},
+        {"order_index": 2, "reagent_name": "水", "categories": [], "time_offset_min": 9, "amount_ml": 100,
+         "safety_measures": ["gloves"], "safety_confirmed": True},
     ],
 })
 check("创建方案", s == 201 and saved["id"] > 0, (s, saved))
 pid = saved["id"]
 check("步骤类别快照回显", saved["steps"][0]["categories"] == ["sulfide"], saved["steps"][0])
+check("创建时安全确认回显", saved["steps"][0]["safety_confirmed"] is True
+      and saved["steps"][0]["safety_measures"] == ["goggles", "gloves"]
+      and saved["safety_summary"]["all_confirmed"] is True, saved["steps"][0])
 
 s, r = call("POST", f"/api/plans/{pid}/simulate?persist=true")
 check("推演成功", s == 200)
@@ -152,6 +170,9 @@ s, exported = call("GET", f"/api/plans/{pid}/export")
 check("导出 JSON 含完整结构", s == 200
       and {"engine", "rule_revision", "status", "first_danger", "timeline", "findings"} <= set(exported),
       s)
+check("导出含安全确认状态", exported["safety"]["all_confirmed"] is True
+      and exported["safety"]["confirmed_steps"] == 3
+      and all(t["safety_confirmed"] is True for t in exported["timeline"]), exported.get("safety"))
 
 s, runs = call("GET", "/api/runs")
 check("推演记录列表", s == 200 and any(x["id"] == run_id for x in runs))
@@ -211,6 +232,7 @@ s, p3 = call("POST", "/api/plans", {
     ],
 })
 pid3 = p3["id"]
+confirm_all_steps(pid3)  # 正式推演门槛：先完成全部步骤安全确认
 
 s, _ = call("POST", "/api/rules", {
     "id": "C010", "source": "azide", "target": "strong_acid",
@@ -287,6 +309,9 @@ s, e = call("GET", f"/api/runs/diff?base_id={run_a}&target_id=999999")
 check("对照记录缺失 404", s == 404, s)
 s, e = call("GET", f"/api/runs/diff?base_id=999998&target_id={run_b}")
 check("基准记录缺失 404", s == 404, s)
+s, other = call("GET", "/api/plans/2")
+if other.get("safety_summary", {}).get("all_confirmed") is not True:
+    confirm_all_steps(2)
 s, other = call("POST", "/api/plans/2/simulate?persist=true")
 run_other = other["run_id"]
 s, e = call("GET", f"/api/runs/diff?base_id={run_a}&target_id={run_other}")
@@ -297,7 +322,7 @@ s, e = call("GET", "/api/runs/diff")
 check("缺少参数 422", s == 422, s)
 
 call("DELETE", f"/api/plans/{pid3}")
-call("DELETE", f"/api/runs/C010")
+call("DELETE", "/api/rules/C010")
 
 # ---------- 9. 方案规则版本（草稿/发布/停用 + 判定口径 + 版本差异） ----------
 print("【场景9】方案规则版本生命周期与判定口径")
@@ -312,9 +337,15 @@ s, pv = call("POST", "/api/plans", {
 pvid = pv["id"]
 check("创建方案", s == 201)
 check("方案初始无生效版本", pv["effective_rule_version"] is None)
+check("方案初始安全确认摘要", pv["safety_summary"]["total_steps"] == 3
+      and pv["safety_summary"]["all_confirmed"] is False, pv.get("safety_summary"))
 
 s, r = call("POST", f"/api/plans/{pvid}/simulate?persist=false")
 check("无版本时按全局规则图判定", r["rule_scope"] == "global" and r["status"] == "danger", r.get("rule_scope"))
+
+s, e = call("POST", f"/api/plans/{pvid}/simulate?persist=true")
+check("未确认时正式推演被门槛拦截 409", s == 409 and "安全确认" in e["detail"], (s, e))
+confirm_all_steps(pvid)
 
 s, vl = call("GET", f"/api/plans/{pvid}/rule-versions")
 check("版本列表初始为空", s == 200 and vl["versions"] == [] and vl["effective_version_id"] is None)
@@ -424,6 +455,115 @@ check("删除方案", s == 204, s)
 s, _ = call("GET", f"/api/plans/{pvid}/rule-versions")
 check("方案删除后版本级联清除", s == 404, s)
 call("DELETE", f"/api/plans/{otherp['id']}")
+
+# ---------- 10. 步骤安全确认：门槛 / 自动失效 / 复核恢复 ----------
+print("【场景10】步骤安全确认（门槛、自动失效与复核）")
+s, sp = call("POST", "/api/plans", {
+    "name": "测试-安全确认",
+    "steps": [
+        {"order_index": 0, "reagent_name": "氰化钾S", "categories": ["cyanide"]},
+        {"order_index": 1, "reagent_name": "盐酸S", "categories": ["strong_acid"]},
+        {"order_index": 2, "reagent_name": "水S", "categories": []},
+    ],
+})
+spid = sp["id"]
+check("创建方案带安全摘要", s == 201 and sp["safety_summary"]["total_steps"] == 3
+      and sp["safety_summary"]["confirmed_steps"] == 0
+      and sp["safety_summary"]["all_confirmed"] is False, sp.get("safety_summary"))
+check("步骤默认未确认", all(x["safety_confirmed"] is False and x["safety_stale"] is False
+      for x in sp["steps"]), sp["steps"])
+
+# 未确认：正式推演 409；预检 / dry-run / 导出不受限
+s, e = call("POST", f"/api/plans/{spid}/simulate?persist=true")
+check("未确认时正式推演 409", s == 409 and "第 1 步" in e["detail"] and "第 3 步" in e["detail"], (s, e))
+s, r = call("POST", f"/api/plans/{spid}/simulate?persist=false")
+check("预检（persist=false）不受门槛限制", s == 200 and r["status"] == "danger", s)
+check("报告含确认状态", r["safety"]["all_confirmed"] is False
+      and r["safety"]["confirmed_steps"] == 0
+      and r["timeline"][0]["safety_confirmed"] is False, r.get("safety"))
+s, r = call("POST", "/api/plans/simulate-dry", {
+    "name": "x", "steps": [{"order_index": 0, "reagent_name": "水", "categories": []}]})
+check("dry-run 预检不受限且带 safety", s == 200 and r["safety"]["total_steps"] == 1, s)
+s, ex = call("GET", f"/api/plans/{spid}/export")
+check("导出不受限且带 safety", s == 200 and ex["safety"]["all_confirmed"] is False, s)
+
+# 细粒度接口逐步确认
+steps = sp["steps"]
+s, u1 = call("PUT", f"/api/plans/{spid}/steps/{steps[0]['id']}/safety",
+             {"safety_measures": ["goggles", "gloves"], "safety_note": "通风橱内操作", "confirmed": True})
+check("确认第 1 步", s == 200 and u1["safety"]["confirmed"] is True
+      and u1["safety"]["measures"] == ["goggles", "gloves"]
+      and u1["safety"]["note"] == "通风橱内操作", (s, u1))
+check("方案摘要进度 1/3", u1["plan_safety"]["confirmed_steps"] == 1
+      and u1["plan_safety"]["all_confirmed"] is False, u1.get("plan_safety"))
+s, _ = call("PUT", f"/api/plans/{spid}/steps/{steps[1]['id']}/safety",
+            {"safety_measures": ["ventilation"], "confirmed": True})
+s, e = call("POST", f"/api/plans/{spid}/simulate?persist=true")
+check("仍有未确认步骤时 409 且指明步骤", s == 409 and "第 3 步" in e["detail"], (s, e))
+s, u3 = call("PUT", f"/api/plans/{spid}/steps/{steps[2]['id']}/safety",
+             {"safety_measures": ["gloves"], "confirmed": True})
+check("全部确认完成", u3["plan_safety"]["all_confirmed"] is True, u3.get("plan_safety"))
+s, r = call("POST", f"/api/plans/{spid}/simulate?persist=true")
+check("全部确认后正式推演放行", s == 200 and r["safety"]["all_confirmed"] is True, s)
+check("时间轴逐步带确认标记", all(t["safety_confirmed"] is True for t in r["timeline"]), r["timeline"])
+run_s = r["run_id"]
+s, one = call("GET", f"/api/runs/{run_s}")
+check("历史推演记录保留确认状态", one["safety"]["all_confirmed"] is True
+      and one["safety"]["confirmed_steps"] == 3, one.get("safety"))
+
+# 取消确认 → 门槛重新生效
+s, ux = call("PUT", f"/api/plans/{spid}/steps/{steps[2]['id']}/safety",
+             {"safety_measures": [], "confirmed": False})
+check("取消确认", s == 200 and ux["safety"]["confirmed"] is False
+      and ux["plan_safety"]["all_confirmed"] is False, (s, ux))
+s, _ = call("PUT", f"/api/plans/{spid}/steps/{steps[2]['id']}/safety",
+            {"safety_measures": ["gloves"], "confirmed": True})
+
+# 整体保存：内容未变步骤继承确认；内容变更步骤确认失效并标记待复核
+s, sp2 = call("PUT", f"/api/plans/{spid}", {"steps": [
+    {"order_index": 0, "reagent_name": "氰化钾S", "categories": ["cyanide"]},
+    {"order_index": 1, "reagent_name": "盐酸S", "categories": ["strong_acid"]},
+    {"order_index": 2, "reagent_name": "水S", "categories": [], "amount_ml": 50,
+     "safety_confirmed": False, "safety_stale": True, "safety_measures": ["gloves"]},
+]})
+check("未携带安全数据时内容未变步骤继承确认", sp2["steps"][0]["safety_confirmed"] is True
+      and sp2["steps"][1]["safety_confirmed"] is True, [x["safety_confirmed"] for x in sp2["steps"]])
+check("变更步骤确认失效并标记待复核", sp2["steps"][2]["safety_confirmed"] is False
+      and sp2["steps"][2]["safety_stale"] is True, sp2["steps"][2])
+check("摘要统计待复核", sp2["safety_summary"]["stale_steps"] == 1
+      and sp2["safety_summary"]["all_confirmed"] is False, sp2["safety_summary"])
+s, e = call("POST", f"/api/plans/{spid}/simulate?persist=true")
+check("待复核步骤同样阻塞正式推演", s == 409 and "待复核" in e["detail"], (s, e))
+
+# 试剂档案变更 → 引用步骤确认自动失效（待复核）
+s, rg = call("POST", "/api/reagents", {"name": "测试试剂S", "categories": ["strong_base"]})
+rid = rg["id"]
+s, spx = call("POST", "/api/plans", {"name": "测试-试剂变更联动", "steps": [
+    {"order_index": 0, "reagent_id": rid, "safety_measures": ["gloves"], "safety_confirmed": True}]})
+check("创建即确认", spx["steps"][0]["safety_confirmed"] is True, spx["steps"][0])
+s, _ = call("PUT", f"/api/reagents/{rid}", {"categories": ["strong_base", "oxidizer"]})
+s, spx2 = call("GET", f"/api/plans/{spx['id']}")
+check("试剂类别变更后确认自动失效", spx2["steps"][0]["safety_confirmed"] is False
+      and spx2["steps"][0]["safety_stale"] is True, spx2["steps"][0])
+s, e = call("POST", f"/api/plans/{spx['id']}/simulate?persist=true")
+check("试剂变更后正式推演被阻塞", s == 409 and "待复核" in e["detail"], (s, e))
+s, u = call("PUT", f"/api/plans/{spx['id']}/steps/{spx2['steps'][0]['id']}/safety",
+            {"safety_measures": ["gloves", "goggles"], "confirmed": True})
+check("重新确认后恢复", u["safety"]["confirmed"] is True and u["safety"]["stale"] is False, u)
+s, r = call("POST", f"/api/plans/{spx['id']}/simulate?persist=true")
+check("重新确认后正式推演放行", s == 200, s)
+
+# 跨方案步骤不可确认 / 参数校验
+s, _ = call("PUT", f"/api/plans/{spid}/steps/{spx2['steps'][0]['id']}/safety",
+            {"safety_measures": [], "confirmed": True})
+check("跨方案步骤确认 404", s == 404, s)
+s, _ = call("PUT", f"/api/plans/{spid}/steps/999999/safety",
+            {"safety_measures": [], "confirmed": True})
+check("不存在步骤 404", s == 404, s)
+
+call("DELETE", f"/api/plans/{spid}")
+call("DELETE", f"/api/plans/{spx['id']}")
+call("DELETE", f"/api/reagents/{rid}")
 
 print(f"\n结果：{PASS} 通过，{FAIL} 失败")
 sys.exit(1 if FAIL else 0)

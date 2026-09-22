@@ -11,7 +11,7 @@ import json
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from . import engine, models, rules_store, versioning
+from . import engine, models, rules_store, safety, versioning
 
 
 def _step_categories(db: Session, step: models.Step) -> list[str]:
@@ -86,7 +86,11 @@ def build_report(
     *,
     rule_version_id: int | None = None,
 ) -> tuple[dict, int | None]:
-    """执行推演，返回 (报告, 实际使用的规则版本 ID)。"""
+    """执行推演，返回 (报告, 实际使用的规则版本 ID)。
+
+    报告附带各步骤安全确认状态（safety 摘要 + 时间轴逐步标记）：
+    正式推演的确认门槛在路由层把控，预检 / 导出同样展示确认状态。
+    """
     rules, revision, resolved_vid, scope = resolve_rule_source(db, plan, rule_version_id)
     steps = plan_to_input(db, plan) if plan is not None else []
     report = engine.simulate(steps, rules, revision)
@@ -95,6 +99,14 @@ def build_report(
         report["rule_version_id"] = resolved_vid
     if plan is not None:
         report["plan_name"] = plan.name
+        summary = safety.plan_safety_summary(db, plan)
+        report["safety"] = summary
+        by_index = {item["order_index"]: item for item in summary["steps"]}
+        for item in report["timeline"]:
+            step_safety = by_index.get(item["order_index"])
+            if step_safety is not None:
+                item["safety_confirmed"] = step_safety["confirmed"]
+                item["safety_stale"] = step_safety["stale"]
     return report, resolved_vid
 
 

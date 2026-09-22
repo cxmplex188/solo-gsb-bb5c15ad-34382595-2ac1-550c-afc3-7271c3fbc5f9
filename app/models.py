@@ -60,6 +60,15 @@ class Step(Base):
     categories: Mapped[str] = mapped_column(Text, default="[]")  # 临时试剂的类别 JSON
     amount_ml: Mapped[float | None] = mapped_column(Float)
     note: Mapped[str | None] = mapped_column(Text)
+    # 步骤安全确认：措施勾选（JSON 数组）+ 安全备注 + 确认状态；
+    # 确认绑定确认时内容指纹（safety_confirmed_fp），步骤内容或所引用
+    # 试剂变更后指纹失配，确认自动失效并呈现"待复核"（见 safety.py）
+    safety_measures: Mapped[str] = mapped_column(Text, default="[]")
+    safety_note: Mapped[str | None] = mapped_column(Text)
+    safety_confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    safety_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    safety_confirmed_fp: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    safety_stale: Mapped[bool] = mapped_column(Boolean, default=False)  # 显式待复核标记
 
     plan: Mapped["Plan"] = relationship(back_populates="steps")
     reagent: Mapped["Reagent | None"] = relationship(back_populates="steps")

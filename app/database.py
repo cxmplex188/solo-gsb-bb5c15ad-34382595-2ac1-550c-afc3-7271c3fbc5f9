@@ -46,6 +46,14 @@ def _ensure_columns():
     inspector = inspect(engine)
     additions = {
         "runs": [("rule_version_id", "INTEGER REFERENCES rule_versions(id) ON DELETE SET NULL")],
+        "steps": [
+            ("safety_measures", "TEXT NOT NULL DEFAULT '[]'"),
+            ("safety_note", "TEXT"),
+            ("safety_confirmed", "BOOLEAN NOT NULL DEFAULT 0"),
+            ("safety_confirmed_at", "DATETIME"),
+            ("safety_confirmed_fp", "VARCHAR(64)"),
+            ("safety_stale", "BOOLEAN NOT NULL DEFAULT 0"),
+        ],
     }
     with engine.begin() as conn:
         for table, cols in additions.items():
